@@ -1,0 +1,20 @@
+[project]
+name = "commonplace-wiki"
+version = "0.1.0"
+description = "A local, evidence-backed AI wiki"
+requires-python = ">=3.12"
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "sqlalchemy>=2.0,<3", "pydantic>=2.10,<3", "httpx>=0.28,<1", "python-multipart>=0.0.20,<1", "pymupdf>=1.25,<2", "beautifulsoup4>=4.13,<5", "python-dotenv>=1.0,<2", "pyyaml>=6,<7"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["backend*"]

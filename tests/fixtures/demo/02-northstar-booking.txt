@@ -1,0 +1,8 @@
+SYNTHETIC DEMO — fictional information, not a real vendor.
+
+Northstar Receptionist Basic — implementation notes, September 12, 2026.
+Northstar Receptionist is the same product as Northstar Voice.
+The Basic plan can request appointments using a connected booking calendar.
+For dental clinics, staff must confirm appointments requiring clinical triage.
+Booking support does not remove the need for a human escalation path.
+
