@@ -22,3 +22,19 @@ def test_html_script_not_extracted(store):
     source=ingest(store,'HTML',b'<html><script>steal()</script><article>Evidence here.</article></html>','html');eid=extract(store,source['id'])
     text=store.db.one('SELECT text FROM passages WHERE extraction_id=?',(eid,))['text']
     assert 'Evidence here.' in text and 'steal' not in text
+
+
+def test_html_main_excludes_megamenu_and_keeps_article_header(store):
+    raw=b'<header>Unrelated NASA highlights</header><main><article><header>Science Objectives</header><p>Look for ancient life.</p></article></main><footer>Links</footer>'
+    source=ingest(store,'NASA-shaped webpage',raw,'html');eid=extract(store,source['id'])
+    text=''.join(p['text'] for p in store.db.all('SELECT text FROM passages WHERE extraction_id=?',(eid,)))
+    assert text=='Science Objectives\nLook for ancient life.'
+
+
+def test_chunks_preserve_text_and_avoid_midword_splits():
+    from backend.ingestion import text_chunks
+    text=('Perseverance studies ancient life.\n'*200)+'x'*4000
+    chunks=list(text_chunks(text))
+    assert ''.join(part for _,part in chunks)==text
+    assert all(part==text[start:start+len(part)] and len(part)<=3000 for start,part in chunks)
+    assert chunks[0][1].endswith('\n')

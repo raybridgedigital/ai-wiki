@@ -10,6 +10,7 @@ from .storage import Conflict,sha
 from .ingestion import extract,ingest,fetch_public
 from .models import Plan,Proposal,ResearchResult,AuditResult,Document
 from .provider import OpenRouter
+from .quotes import source_quote
 
 def prompt(name):
     return (ROOT/'backend/prompts'/f'{name}.md').read_text()+'\n'+(ROOT/'config/wiki-rules.md').read_text()
@@ -66,6 +67,13 @@ class Worker:
         self.db.execute('UPDATE jobs SET stage=?,updated=? WHERE id=?',(message,now(),jid))
 
     def process(self,jid):
+        if self.store.reset_failed:return
+        try:
+            with self.store.gate.activity():self._process(jid)
+        except ValueError:
+            return  # Reset may have started between polling and dispatch.
+
+    def _process(self,jid):
         job=self.db.one('SELECT * FROM jobs WHERE id=?',(jid,))
         if not job or job['state']!='QUEUED':
             return
@@ -110,6 +118,75 @@ class Worker:
         ids=[r['id'] for r in results if r['kind']=='WIKI'][:6]
         return [self.store.page(i) for i in ids]
 
+    def generate_cited(self,provider,instructions,payload,schema):
+        """Retry a rejected quote once; never relax stored citation validation."""
+        allowed={p['id'] for p in payload['passages']}
+        request=payload
+        for attempt in range(2):
+            result=provider.generate(instructions,request,schema)
+            documents=([Document(title=c.title,blocks=c.blocks) for c in result.changes]
+                       if isinstance(result,Proposal) else [Document(title='Evidence',blocks=result.blocks)])
+            if any(e.passage_id not in allowed for d in documents for b in d.blocks for e in b.evidence):
+                raise ValueError('Model cited a passage outside the supplied evidence')
+            # Store exact source spans, never the model's typographic version.
+            for doc in documents:
+                for block in doc.blocks:
+                    for evidence in block.evidence:
+                        text=self.store.evidence([evidence.passage_id])[0]['text']
+                        evidence.quote=source_quote(evidence.quote,text)
+            try:
+                for doc in documents:
+                    self.store.validate_doc(doc)
+                return result
+            except ValueError as exc:
+                if not str(exc).startswith('Quote is absent from passage '):
+                    raise
+                self.db.event('citation_validation','Model quote rejected',{'mismatches':[{'passage_id':e.passage_id,'quote':e.quote} for d in documents for b in d.blocks for e in b.evidence if e.quote not in self.store.evidence([e.passage_id])[0]['text']]})
+                if attempt:
+                    raise ValueError(f'{exc}. The model could not provide an exact source quote after one correction attempt. No wiki changes were saved; your source is preserved. Retry compilation.') from exc
+                request={**payload,'citation_correction':{
+                    'error':str(exc),'previous_result':result.model_dump(),
+                    'instruction':'Return a corrected full result. Copy each quote verbatim from its supplied passage, including whitespace and punctuation. Never combine text across passages or paraphrase a quote. Remove unsupported claims or mark them Uncertain without evidence.'}}
+
+    def generate_planned(self,provider,payload,plan,pages):
+        if not any(a.type!='NO_CHANGE' for a in plan.actions):
+            return Proposal(changes=[])
+        request={**payload,'plan':plan.model_dump()}
+        for attempt in range(2):
+            proposal=self.generate_cited(provider,prompt('compiler_update'),request,Proposal)
+            errors=self.check_plan(proposal,plan,pages)
+            if not errors:
+                return proposal
+            self.db.event('plan_validation','Draft exceeded its plan',{'errors':errors})
+            if attempt:
+                raise ValueError('The model still proposed edits outside the approved plan after one correction attempt. No wiki changes were saved. '+ '; '.join(errors))
+            request={**payload,'plan':plan.model_dump(),'plan_correction':{
+                'errors':errors,'previous_result':proposal.model_dump(),
+                'instruction':'Return the full corrected proposal within the SAME plan. Omit unchanged blocks. Modify existing blocks only when their IDs are listed in section_ids for that page. Use a new unique block ID for genuinely new sections. Do not move an unapproved rewrite to a new block. Keep all other existing content and evidence intact.'}}
+
+    @staticmethod
+    def check_plan(proposal,plan,pages):
+        updates={a.page_id:a for a in plan.actions if a.type=='UPDATE_PAGE'}
+        creates={a.title for a in plan.actions if a.type=='CREATE_PAGE'}
+        existing={p['id']:Document.model_validate(p['revision']['doc']) for p in pages}
+        errors=[]
+        for change in proposal.changes:
+            if change.page_id:
+                action=updates.get(change.page_id)
+                if not action or change.expected_revision!=action.expected_revision or change.page_id not in existing:
+                    errors.append(f'Update to {change.page_id} was not in the validated plan or has the wrong revision')
+                    continue
+                blocks={b.id:b for b in existing[change.page_id].blocks}
+                # Echoing an identical block is not an edit. Omit it from the
+                # incremental update so storage retains the original untouched.
+                change.blocks=[b for b in change.blocks if b!=blocks.get(b.id)]
+                outside=[b.id for b in change.blocks if b.id in blocks and b.id not in action.section_ids]
+                if outside:
+                    errors.append(f'Page {change.page_id}: unplanned sections {outside}; permitted existing sections: {action.section_ids}')
+            elif change.title not in creates:
+                errors.append(f'New page {change.title!r} was not in the validated plan')
+        return errors
+
     def compile(self,jid,data):
         self.stage(jid,'Reading source evidence')
         if data.get('answer_id'):
@@ -123,7 +200,9 @@ class Worker:
             source=self.db.one('SELECT * FROM sources WHERE id=?',(data['source_id'],))
             if not source:
                 raise KeyError('Source not found')
-            eid=extract(self.store,source['id']) if not source['extraction_id'] or data.get('reextract') else source['extraction_id']
+            previous=self.db.one('SELECT extractor FROM extractions WHERE id=?',(source['extraction_id'],))
+            upgrade_html=source['type']=='html' and previous and previous['extractor']=='beautifulsoup-html-v1'
+            eid=extract(self.store,source['id']) if not source['extraction_id'] or data.get('reextract') or upgrade_html else source['extraction_id']
             if data.get('extract_only'):
                 self.complete(jid,{'source_id':source['id'],'extraction_id':eid})
                 return
@@ -137,7 +216,7 @@ class Worker:
             for offset in range(0,len(evidence),2):
                 self.stage(jid,f'Analyzing source passages {offset+1}–{min(offset+2,len(evidence))} of {len(evidence)}')
                 batch=evidence[offset:offset+2]
-                result=provider.generate(prompt('researcher'),{'question':'Extract the significant factual information from all supplied passages with exact supporting quotations. Preserve concrete values, dates and limitations.','passages':batch},ResearchResult)
+                result=self.generate_cited(provider,prompt('researcher'),{'question':'Extract the significant factual information from all supplied passages with exact supporting quotations. Preserve concrete values, dates and limitations.','passages':batch},ResearchResult)
                 self.store.validate_doc(Document(title='Analysis',blocks=result.blocks))
                 allowed={p['id'] for p in batch}
                 for block in result.blocks:
@@ -160,19 +239,7 @@ class Worker:
             if action.type=='UPDATE_PAGE' and (action.page_id not in read or action.expected_revision!=read[action.page_id]):
                 raise Conflict('Plan targeted a page revision not supplied in context. Retry with a more specific source title.')
         self.stage(jid,'Drafting evidence-backed updates')
-        proposal=provider.generate(prompt('compiler_update'),{**payload,'plan':plan.model_dump()},Proposal) if any(a.type!='NO_CHANGE' for a in plan.actions) else Proposal(changes=[])
-        planned_updates={a.page_id:a for a in plan.actions if a.type=='UPDATE_PAGE'}
-        planned_creates={a.title for a in plan.actions if a.type=='CREATE_PAGE'}
-        for change in proposal.changes:
-            if change.page_id:
-                action=planned_updates.get(change.page_id)
-                if not action or change.expected_revision!=action.expected_revision:
-                    raise ValueError('Generated update was not in the validated plan')
-                existing_ids={b['id'] for p in pages if p['id']==change.page_id for b in p['revision']['doc']['blocks']}
-                if any(b.id in existing_ids and b.id not in action.section_ids for b in change.blocks):
-                    raise ValueError('Generated edit changed a section outside the approved plan')
-            elif change.title not in planned_creates:
-                raise ValueError('Generated page was not in the validated plan')
+        proposal=self.generate_planned(provider,payload,plan,pages)
         allowed={p['id'] for p in payload['passages']}
         package={'changes':proposal.model_dump()['changes'],'plan':plan.model_dump(),'allowed_evidence':list(allowed),'model':provider.model,'prompt_hash':sha(prompt('compiler_plan')+prompt('compiler_update'))}
         self.db.execute('UPDATE jobs SET proposal=? WHERE id=?',(dump(package),jid))
@@ -213,7 +280,7 @@ class Worker:
         evidence=self.store.evidence(evidence_ids)
         self.stage(jid,'Researching local evidence')
         provider=self.provider_factory(self.store,jid,'research')
-        result=provider.generate(prompt('researcher'),{'question':question,'wiki_pages':[{'page_id':p['id'],'revision_id':p['revision_id'],'doc':p['revision']['doc']} for p in pages],'passages':evidence},ResearchResult)
+        result=self.generate_cited(provider,prompt('researcher'),{'question':question,'wiki_pages':[{'page_id':p['id'],'revision_id':p['revision_id'],'doc':p['revision']['doc']} for p in pages],'passages':evidence},ResearchResult)
         self.store.validate_doc(Document(title=question,blocks=result.blocks))
         allowed={p['id'] for p in evidence}
         if any(e.passage_id not in allowed for b in result.blocks for e in b.evidence):

@@ -96,11 +96,12 @@ def extract(store, sid):
                     warnings.append(f'Page {i+1} has no extracted text; images were not interpreted.')
                 units.append((text,f'page {i+1}'))
     elif source['type']=='html':
-        extractor = 'beautifulsoup-html-v1'
+        extractor = 'beautifulsoup-html-v2'
         soup=BeautifulSoup(raw,'html.parser')
         for tag in soup(['script','style','nav','footer','noscript','iframe']):
             tag.decompose()
-        units=[(soup.get_text('\n',strip=True),'webpage text')]
+        content = soup.find('main') or soup.find(attrs={'role':'main'}) or soup.find('article') or soup
+        units=[(content.get_text('\n',strip=True),'webpage text')]
         warnings.append('Snapshot contains fetched HTML; JavaScript content and images are not interpreted.')
     else:
         try:
@@ -115,8 +116,7 @@ def extract(store, sid):
     eid=uid('EXT')
     passages=[]
     for text,location in units:
-        for start in range(0,len(text),3000):
-            part=text[start:start+3000]
+        for start,part in text_chunks(text):
             if part.strip():
                 passages.append((f'{eid}:P-{len(passages)+1:03}',eid,part,f'{location}, characters {start}–{start+len(part)}'))
     snapshot={'id':eid,'source_id':sid,'extractor':extractor,'passages':[{'id':p[0],'text':p[2],'locator':p[3]} for p in passages]}
@@ -128,3 +128,21 @@ def extract(store, sid):
         c.execute("DELETE FROM search_index WHERE id=?",(sid,))
         c.execute('INSERT INTO search_index VALUES(?,?,?,?)',(sid,'SOURCE',source['title'],'\n'.join(p[2] for p in passages)))
     return eid
+
+
+def text_chunks(text, limit=3000):
+    """Keep exact offsets while preferring paragraph/sentence boundaries."""
+    start=0
+    while start<len(text):
+        end=min(start+limit,len(text))
+        if end<len(text):
+            lower=start+limit//2
+            boundary=text.rfind('\n',lower,end)
+            if boundary<0:
+                boundary=text.rfind('. ',lower,end)
+            if boundary<0:
+                boundary=text.rfind(' ',lower,end)
+            if boundary>=0:
+                end=boundary+1
+        yield start,text[start:end]
+        start=end

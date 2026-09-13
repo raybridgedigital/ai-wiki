@@ -20,6 +20,10 @@ class Store:
     def __init__(self, db):
         self.db = db
         self.root = db.root
+        from .reset import WorkspaceGate,resume_reset
+        self.gate=WorkspaceGate()
+        self.reset_failed=False
+        resume_reset(self)
         from .oauth import migrate_legacy
         migrate_legacy(self)
 

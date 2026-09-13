@@ -40,7 +40,17 @@ def create_app(root=None,start_worker=True,provider_factory=None):
                 return JSONResponse({'error':'Cross-origin mutation rejected'},403)
             if request.headers.get('x-commonplace')!='local':
                 return JSONResponse({'error':'Missing local application request header'},403)
-        response=await call_next(request)
+        if request.url.path.startswith('/api'):
+            if store.reset_failed:
+                return JSONResponse({'error':'Restart the app to finish the interrupted reset.'},503)
+            if request.url.path != '/api/settings/reset':
+                gate=store.gate.activity()
+                try:gate.__enter__()
+                except ValueError as exc:return JSONResponse({'error':str(exc)},503)
+                try:response=await call_next(request)
+                finally:gate.__exit__(None,None,None)
+            else:response=await call_next(request)
+        else:response=await call_next(request)
         response.headers['X-Content-Type-Options']='nosniff'
         response.headers['Referrer-Policy']='no-referrer'
         return response

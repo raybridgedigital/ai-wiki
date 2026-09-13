@@ -1,0 +1,16 @@
+#!/bin/sh
+# Start Commonplace's backend and frontend from any working directory.
+set -eu
+APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
+    echo "Missing Python environment. Run ./setup.sh in $APP_DIR first." >&2
+    exit 1
+fi
+if ! command -v npm >/dev/null 2>&1; then
+    echo "npm is required. Install Node.js, then run commonplace again." >&2
+    exit 1
+fi
+
+printf '\nStarting Commonplace: http://127.0.0.1:5173/\nKeep this terminal open. Press Ctrl+C to stop both servers.\n\n'
+exec "$APP_DIR/.venv/bin/python" "$APP_DIR/start.py" --dev "$@"

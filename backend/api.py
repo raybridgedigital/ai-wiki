@@ -341,3 +341,15 @@ def demo(r:Request):
         source=ingest(store(r),'Synthetic demo · '+path.stem,path.read_bytes(),'text',metadata={'synthetic':True})
         jobs.append(decoded(worker(r).submit('extract',{'source_id':source['id']})))
     return jobs
+
+
+class ResetRequest(Strict):
+    confirmation:str
+    forget_connections:bool=False
+
+@router.post('/settings/reset')
+def reset_app(r:Request,body:ResetRequest):
+    if body.confirmation!='RESET':raise ValueError('Type RESET exactly to confirm permanent deletion.')
+    from .reset import reset_workspace
+    reset_workspace(store(r),body.forget_connections)
+    return {'ok':True,'message':'Workspace cleared. External models are off.'}

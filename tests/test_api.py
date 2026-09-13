@@ -52,3 +52,22 @@ def test_missing_provider_retains_source(client,monkeypatch):
 
 def test_unsupported_upload(client):
     assert client.post('/api/sources/files',files={'file':('malware.exe',b'abc')}).status_code==400
+
+
+def test_batch_file_requests_continue_after_failure_and_retry_idempotently(client):
+    def upload(name,raw,key):
+        return client.post('/api/sources/files',files={'file':(name,raw)},data={'title':'folder/'+name,'compile':'false'},headers={'Idempotency-Key':key})
+    first=upload('first.md',b'First source.','batch-1')
+    assert first.status_code==202
+    assert upload('empty.txt',b'','batch-2').status_code==400
+    last=upload('last.txt',b'Last source.','batch-3')
+    assert last.status_code==202
+    retry=upload('first.md',b'First source.','batch-1')
+    assert retry.status_code==202
+    assert retry.json()['job']['id']==first.json()['job']['id']
+    assert len(client.get('/api/sources').json())==2
+    for response in (first,last):
+        client.app.state.worker.process(response.json()['job']['id'])
+        src=client.get('/api/sources/'+response.json()['source']['id']).json()
+        assert src['status']=='EXTRACTED'
+        assert src['title'].startswith('folder/')

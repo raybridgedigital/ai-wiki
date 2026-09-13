@@ -77,3 +77,21 @@ def test_custom_connection_routes_auth(store,monkeypatch,auth):
     monkeypatch.setattr(httpx.Client,'post',post)
     job=Worker(store).submit('compile',{})
     assert OpenRouter(store,job['id'],'compiler').generate('JSON',{},Plan).actions==[]
+
+
+@pytest.mark.parametrize('budget,expected',[ (16000,[4096,8192]), (4096,[4096]) ])
+def test_truncated_response_retry_respects_budget(store,monkeypatch,budget,expected):
+    for key,value in [('external_models_enabled',True),('default_model','test'),('max_output_tokens',budget)]:
+        store.db.execute('INSERT INTO settings VALUES(?,?)',(key,json.dumps(value)))
+    monkeypatch.setenv('OPENROUTER_API_KEY','test-key')
+    calls=[]
+    def post(*args,**kwargs):
+        calls.append(kwargs['json']['max_tokens'])
+        return httpx.Response(200,json={'choices':[{'finish_reason':'length' if len(calls)==1 else 'stop','message':{'content':'{"actions":[]}'}}]})
+    monkeypatch.setattr(httpx.Client,'post',post)
+    job=Worker(store).submit('compile',{});provider=OpenRouter(store,job['id'],'compiler')
+    if budget==4096:
+        with pytest.raises(ProviderError,match='budget'):provider.generate('JSON',{},Plan)
+    else:
+        assert provider.generate('JSON',{},Plan).actions==[]
+    assert calls==expected

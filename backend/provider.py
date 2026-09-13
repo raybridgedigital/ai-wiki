@@ -2,6 +2,8 @@ import json
 import os
 import time
 import httpx
+from pydantic import ValidationError
+from .citation_refs import prepare,resolve,INSTRUCTIONS
 from .db import dump,now
 from .config import provider_for,model_for,require_external,validate_endpoint
 from .oauth import authorization_headers
@@ -23,8 +25,10 @@ class OpenRouter:
         if not self.model:
             raise ProviderError(f'Configure a {self.provider["name"]} API key and model in Settings to enable AI processing.')
         validate_endpoint(self.provider['base_url'])
-        schema_text=json.dumps(schema.model_json_schema())
-        messages=[{'role':'system','content':prompt+'\nReturn only valid JSON conforming to this schema:\n'+schema_text},{'role':'user','content':dump(payload)}]
+        request,wire_schema,catalog=prepare(payload,schema)
+        if catalog is not None:prompt += INSTRUCTIONS
+        schema_text=json.dumps(wire_schema.model_json_schema())
+        messages=[{'role':'system','content':prompt+'\nReturn only valid JSON conforming to this schema:\n'+schema_text},{'role':'user','content':dump(request)}]
         # UTF-8 byte count is a deliberately conservative token upper bound.
         reserve_in=len(dump(messages).encode())+100
         reserve_out=min(4096,self.settings['max_output_tokens']-self.usage['reserved_output_tokens'])
@@ -60,8 +64,20 @@ class OpenRouter:
                 if usage.get('cost') is not None:
                     self.usage['reported_cost']=self.usage.get('reported_cost',0)+usage['cost']
                 self._record()
-                text=result['choices'][0]['message']['content']
-                return schema.model_validate_json(text)
+                choice=result['choices'][0]
+                if choice.get('finish_reason')=='length':
+                    if attempt<2:
+                        reserve_out=min(reserve_out*2,16384,self.settings['context_tokens']-reserve_in)
+                        continue
+                    raise ProviderError('Model output was cut off by its response limit after bounded retries. No unvalidated knowledge was committed.')
+                text=choice['message']['content']
+                try:
+                    parsed=wire_schema.model_validate_json(text)
+                    return resolve(parsed,schema,catalog) if catalog is not None else parsed
+                except ValidationError as exc:
+                    issues=[{'field':'.'.join(str(v) for v in e['loc']),'type':e['type']} for e in exc.errors(include_input=False,include_url=False)]
+                    self.store.db.event('model_validation','Model response did not match the required structure',{'issues':issues})
+                    raise ProviderError('Model response did not match the required structure: '+dump(issues)[:600]) from exc
             except (httpx.TimeoutException,httpx.ConnectError):
                 if attempt==2:
                     raise ProviderError('Provider connection failed after bounded retries. A timed-out request may still have incurred a charge.')

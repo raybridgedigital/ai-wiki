@@ -78,3 +78,13 @@ npm --prefix frontend run build
 Tests cover immutable evidence, transactional/stale updates, locks, crash materialization, extraction, URL restrictions, research/compiler workflows, backup restoration, provider routing, the external-access switch, and mocked OAuth exchange/refresh. Browser inspection covers the settings form and disabled controls. Live provider inference and real registered OAuth login have not been tested without user credentials.
 
 Current retrieval uses SQLite FTS and bounded context, not vector search. OCR, multi-user access, scheduled maintenance, and provider-specific subscription bridges are outside this implementation. Conservative byte-based token reservations may reject large inputs before a provider's actual token limit. Provider/model compatibility and semantic output quality still require evaluation with the chosen real model. The system validates evidence identity and quote matching; it cannot prove that every generated interpretation is correct.
+
+## Reset for a different vertical
+
+Settings → Start a new vertical → Reset app requires typing RESET. It deletes all stored sources, extracted text, pages, revisions, answers, jobs, activity, issues, indexes, and recovery copies. Export/full-backup first. Running processing blocks reset. External models are always turned off afterward. The optional checkbox also restores settings defaults and removes saved API keys for this installation and OAuth tokens for this workspace. Otherwise provider configuration is kept. App code, trusted rules, and exports/backups outside the workspace remain. This is logical deletion, not a promise of forensic erasure or removal from external backups. Interrupted cleanup is completed on startup before jobs run.
+
+### Citation selection
+
+Model-generated research, long-source analysis and page drafts select request-scoped evidence IDs. The application builds these IDs from exact saved source excerpts and resolves them back to the existing passage-ID/quote format before validation or review. Models no longer have to reproduce quotation text. Existing multi-sentence citations remain selectable so updates can retain prior evidence. Unknown IDs are rejected; citations cannot reach outside the supplied context.
+
+This prevents quote-copy errors caused by capitalization, punctuation, Unicode or Markdown. It does not prove that a claim follows from the selected excerpt: review the claim and citation together. Original extractions, existing citations and the final exact-substring storage check are retained.
